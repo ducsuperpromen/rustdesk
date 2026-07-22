@@ -1,0 +1,183 @@
+# ENZU custom-client GitLab CI/CD.
+#
+# Mirrors .github/workflows/enzu-build.yml. ENZU-specific and additive: it does not
+# touch upstream RustDesk files, so `git merge upstream/master` stays conflict-free.
+#
+# Scope (deliberately minimal):
+#   - Android arm64-v8a  (aarch64-linux-android)   -> runs on a Linux runner
+#   - Windows x64        (x86_64-pc-windows-msvc)   -> runs on a tagged Windows runner (manual)
+#
+# Ordering: Android FIRST, Windows SECOND. Android does NOT depend on Windows.
+# Each job builds its own bridge inline so the jobs are fully independent — there is
+# no shared bridge stage and no cross-platform dependency.
+#
+# No releases are published — APK / build folder are exposed as job artifacts only.
+#
+# IMPORTANT (new GitLab repo): this pipeline is designed to run from the
+# feature/enzu-custom-client branch. It must never be merged into gitlab `main`,
+# and it does not pull or merge the initial README commit.
+
+stages:
+  - android
+  - windows
+
+variables:
+  RUST_VERSION: "1.75"
+  CARGO_NDK_VERSION: "3.1.2"
+  FLUTTER_VERSION: "3.24.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  NDK_VERSION: "r28c"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VERSION: "1.4.9"
+  GIT_SUBMODULE_STRATEGY: recursive
+  GIT_SUBMODULE_DEPTH: 1
+
+# ---------------------------------------------------------------------------
+# Android arm64-v8a. Self-contained: installs toolchain, generates the bridge,
+# builds the native lib and the APK. Does NOT depend on any other job.
+# ---------------------------------------------------------------------------
+android-arm64:
+  stage: android
+  image: ubuntu:24.04
+  tags:
+    - linux
+  # Only build on the ENZU feature branch; never on gitlab main.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/enzu-custom-client"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+    VCPKG_ROOT: /opt/vcpkg
+    ANDROID_NDK_HOME: /opt/android-ndk-r28c
+    ANDROID_NDK_ROOT: /opt/android-ndk-r28c
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  cache:
+    # Best-effort only. A cache miss / cache-service failure must never fail the build.
+    key: enzu-android-arm64
+    policy: pull-push
+    paths:
+      - .cargo/
+      - target/
+    when: always
+  before_script:
+    - set -e
+    - apt-get update
+    - apt-get install -y
+        clang cmake curl gcc-multilib git g++ g++-multilib
+        libayatana-appindicator3-dev libasound2-dev libc6-dev
+        libclang-dev libunwind-dev libgstreamer1.0-dev
+        libgstreamer-plugins-base1.0-dev libgtk-3-dev libpam0g-dev
+        libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev
+        libxcb-xfixes0-dev libxdo-dev libxfixes-dev llvm-dev nasm
+        ninja-build openjdk-17-jdk-headless pkg-config tree wget unzip zip xz-utils
+    # --- Rust ---
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_VERSION" --profile minimal --component rustfmt
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - rustup target add aarch64-linux-android
+    # --- Flutter (app build version) ---
+    - git clone --depth 1 -b "$FLUTTER_VERSION" https://github.com/flutter/flutter.git /opt/flutter
+    - export PATH="/opt/flutter/bin:$PATH"
+    - flutter --version
+    - '[ "$FLUTTER_VERSION" = "3.24.5" ] && (cd /opt/flutter && git apply "$CI_PROJECT_DIR/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff" || true)'
+    # --- Android NDK r28c ---
+    - wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip -O /tmp/ndk.zip
+    - unzip -q /tmp/ndk.zip -d /opt
+    # --- vcpkg ---
+    - git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+    - git -C "$VCPKG_ROOT" checkout "$VCPKG_COMMIT_ID"
+    - "$VCPKG_ROOT/bootstrap-vcpkg.sh -disableMetrics"
+  script:
+    - export PATH="$CARGO_HOME/bin:/opt/flutter/bin:$PATH"
+    - export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    - export PATH="$JAVA_HOME/bin:$PATH"
+    # 1) Generate flutter-rust-bridge inline (upstream default bridge = Flutter 3.22.3
+    #    for codegen; the app is still built with $FLUTTER_VERSION below).
+    - git clone --depth 1 -b "$BRIDGE_FLUTTER_VERSION" https://github.com/flutter/flutter.git /opt/flutter-bridge
+    - cargo install cargo-expand --version "$CARGO_EXPAND_VERSION" --locked
+    - cargo install flutter_rust_bridge_codegen --version "$FLUTTER_RUST_BRIDGE_VERSION" --features "uuid" --locked
+    - "sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml"
+    - (export PATH="/opt/flutter-bridge/bin:$PATH"; cd flutter && flutter pub get)
+    - PATH="/opt/flutter-bridge/bin:$PATH" "$CARGO_HOME/bin/flutter_rust_bridge_codegen"
+        --rust-input ./src/flutter_ffi.rs
+        --dart-output ./flutter/lib/generated_bridge.dart
+        --c-output ./flutter/macos/Runner/bridge_generated.h
+    # Restore pubspec (bridge downgrade) so the app build resolves its own deps cleanly.
+    - git checkout -- flutter/pubspec.yaml
+    # 2) vcpkg deps for arm64-v8a
+    - ./flutter/build_android_deps.sh arm64-v8a
+    # 3) Native rust lib
+    - cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
+    - ./flutter/ndk_arm64.sh
+    - mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+    - cp ./target/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+    - cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+    # 4) APK (debug signing — no release secrets required)
+    - sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+    - sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+    - (cd flutter && flutter build apk --release --target-platform android-arm64 --split-per-abi)
+    - mv flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ./enzu-rustdesk-${VERSION}-android-arm64.apk
+  artifacts:
+    name: enzu-rustdesk-android-arm64
+    expire_in: 14 days
+    when: on_success
+    paths:
+      - enzu-rustdesk-${VERSION}-android-arm64.apk
+
+# ---------------------------------------------------------------------------
+# Windows x64. Separate job on a tagged Windows runner. Manual — many GitLab
+# groups have no Windows runner; this keeps the pipeline green when one is absent.
+# Assumes a self-hosted shell runner (tags: windows, x64) with git, python3,
+# Visual Studio Build Tools, and internet access.
+# ---------------------------------------------------------------------------
+windows-x64:
+  stage: windows
+  tags:
+    - windows
+    - x64
+  needs: []          # do NOT depend on the Android job
+  when: manual
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/enzu-custom-client"'
+      when: manual
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  variables:
+    VCPKG_ROOT: "C:\\vcpkg"
+    VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+  script:
+    - $ErrorActionPreference = "Stop"
+    # --- Rust ---
+    - Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+    - .\rustup-init.exe -y --default-toolchain $env:RUST_VERSION --profile minimal --component rustfmt
+    - $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    - rustup target add x86_64-pc-windows-msvc
+    # --- Flutter ---
+    - git clone --depth 1 -b $env:FLUTTER_VERSION https://github.com/flutter/flutter.git C:\flutter
+    - $env:PATH = "C:\flutter\bin;$env:PATH"
+    - flutter --version
+    # --- Bridge (inline, Flutter 3.22.3 for codegen) ---
+    - git clone --depth 1 -b $env:BRIDGE_FLUTTER_VERSION https://github.com/flutter/flutter.git C:\flutter-bridge
+    - cargo install cargo-expand --version $env:CARGO_EXPAND_VERSION --locked
+    - cargo install flutter_rust_bridge_codegen --version $env:FLUTTER_RUST_BRIDGE_VERSION --features "uuid" --locked
+    - '(Get-Content flutter\pubspec.yaml) -replace ''extended_text: 14.0.0'',''extended_text: 13.0.0'' | Set-Content flutter\pubspec.yaml'
+    - $env:PATH = "C:\flutter-bridge\bin;$env:PATH"; Push-Location flutter; flutter pub get; Pop-Location
+    - flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+    - $env:PATH = "C:\flutter\bin;$env:PATH"
+    - git checkout -- flutter/pubspec.yaml
+    # --- vcpkg ---
+    - if (-not (Test-Path $env:VCPKG_ROOT)) { git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT }
+    - git -C $env:VCPKG_ROOT checkout $env:VCPKG_COMMIT_ID
+    - '& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics'
+    - '& "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"'
+    # --- Build ---
+    - python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+    - Move-Item -Force .\flutter\build\windows\x64\runner\Release .\rustdesk
+  artifacts:
+    name: enzu-rustdesk-windows-x64
+    expire_in: 14 days
+    when: on_success
+    paths:
+      - rustdesk/
