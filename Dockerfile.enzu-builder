@@ -1,0 +1,101 @@
+# ENZU Android builder image.
+#
+# A reusable, pinned toolchain image for building the ENZU RustDesk Android
+# arm64-v8a APK on GitLab CI. It contains every heavy dependency so the pipeline
+# only has to: pull image -> checkout -> generate bridge -> build -> upload.
+#
+# This image is ENZU-specific and additive. It does NOT modify any RustDesk
+# source, so it never conflicts with `git merge upstream/master`.
+#
+# NOTE: intentionally NOT published. Build it locally / on your registry:
+#   docker build -f Dockerfile.enzu-builder -t enzu/rustdesk-builder:latest .
+# See docs/BUILDER_IMAGE.md.
+#
+# Versions below are pinned to match .github/workflows/enzu-build.yml and upstream
+# flutter-build.yml so an image build produces binaries identical to hosted CI.
+
+FROM ubuntu:24.04
+
+# ---- pinned tool versions (keep in sync with enzu-build.yml) ----
+ENV RUST_VERSION=1.75.0 \
+    CARGO_NDK_VERSION=3.1.2 \
+    CARGO_EXPAND_VERSION=1.0.95 \
+    FLUTTER_RUST_BRIDGE_VERSION=1.80.1 \
+    FLUTTER_VERSION=3.24.5 \
+    BRIDGE_FLUTTER_VERSION=3.22.3 \
+    NDK_VERSION=r28c \
+    VCPKG_COMMIT_ID=120deac3062162151622ca4860575a33844ba10b \
+    ANDROID_SDK_TOOLS_VERSION=11076708 \
+    ANDROID_PLATFORM=android-33 \
+    ANDROID_BUILD_TOOLS=34.0.0
+
+# ---- image layout ----
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    FLUTTER_HOME=/opt/flutter \
+    BRIDGE_FLUTTER_HOME=/opt/flutter-bridge \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_NDK_HOME=/opt/android-ndk \
+    ANDROID_NDK_ROOT=/opt/android-ndk \
+    VCPKG_ROOT=/opt/vcpkg \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH=$CARGO_HOME/bin:$FLUTTER_HOME/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$JAVA_HOME/bin:$PATH
+
+# ---- OS build dependencies (same set the hosted Android job installs) ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates clang cmake curl gcc-multilib git g++ g++-multilib \
+        libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
+        libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        libgtk-3-dev libpam0g-dev libpulse-dev libva-dev libxcb-randr0-dev \
+        libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev llvm-dev \
+        nasm ninja-build openjdk-17-jdk-headless pkg-config python3 python3-pip \
+        tree unzip wget xz-utils zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Rust 1.75 + cargo tooling (system-wide) ----
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal --component rustfmt \
+    && chmod -R a+w $CARGO_HOME $RUSTUP_HOME \
+    && rustup target add aarch64-linux-android \
+    && cargo install cargo-ndk --version ${CARGO_NDK_VERSION} --locked \
+    && cargo install cargo-expand --version ${CARGO_EXPAND_VERSION} --locked \
+    && cargo install flutter_rust_bridge_codegen --version ${FLUTTER_RUST_BRIDGE_VERSION} --features "uuid" --locked \
+    && rm -rf $CARGO_HOME/registry/cache
+
+# ---- Android NDK r28c (Google direct download, deterministic) ----
+RUN wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip -O /tmp/ndk.zip \
+    && unzip -q /tmp/ndk.zip -d /opt \
+    && mv /opt/android-ndk-${NDK_VERSION} ${ANDROID_NDK_HOME} \
+    && rm /tmp/ndk.zip
+
+# ---- Android SDK (command-line tools + platform + build-tools) ----
+RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools \
+    && wget -q https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_SDK_TOOLS_VERSION}_latest.zip -O /tmp/cmdline.zip \
+    && unzip -q /tmp/cmdline.zip -d ${ANDROID_SDK_ROOT}/cmdline-tools \
+    && mv ${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools ${ANDROID_SDK_ROOT}/cmdline-tools/latest \
+    && rm /tmp/cmdline.zip \
+    && yes | sdkmanager --licenses >/dev/null \
+    && sdkmanager --install "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" >/dev/null
+
+# ---- Flutter 3.24.5 (app build) + 3.22.3 (bridge codegen) ----
+RUN git clone --depth 1 -b ${FLUTTER_VERSION} https://github.com/flutter/flutter.git ${FLUTTER_HOME} \
+    && git clone --depth 1 -b ${BRIDGE_FLUTTER_VERSION} https://github.com/flutter/flutter.git ${BRIDGE_FLUTTER_HOME} \
+    && git config --global --add safe.directory ${FLUTTER_HOME} \
+    && git config --global --add safe.directory ${BRIDGE_FLUTTER_HOME} \
+    && ${FLUTTER_HOME}/bin/flutter config --no-analytics \
+    && ${FLUTTER_HOME}/bin/flutter config --android-sdk ${ANDROID_SDK_ROOT} \
+    && ${FLUTTER_HOME}/bin/flutter precache --android --universal \
+    && ${BRIDGE_FLUTTER_HOME}/bin/flutter --version
+
+# ---- vcpkg (bootstrapped at the pinned commit) ----
+RUN git clone https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} \
+    && git -C ${VCPKG_ROOT} checkout ${VCPKG_COMMIT_ID} \
+    && ${VCPKG_ROOT}/bootstrap-vcpkg.sh -disableMetrics \
+    && git config --global --add safe.directory ${VCPKG_ROOT}
+
+# Allow CI to run git inside the checked-out repo regardless of uid.
+RUN git config --global --add safe.directory '*'
+
+CMD ["/bin/bash"]

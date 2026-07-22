@@ -4,56 +4,70 @@ This document describes the ENZU custom-client CI/CD layer for this RustDesk for
 
 > **Scope**: infrastructure only. The application is built **exactly** as upstream
 > builds it (identical toolchain versions and build scripts). No branding, server,
-> relay, key, package, app-name, icon, or feature changes are made. The only
-> difference from upstream CI is *which* platforms are built and that ENZU CI
+> relay, key, package, app-name, icon, or feature changes are made. ENZU CI
 > **uploads artifacts only — it never publishes releases**.
 
 ---
 
-## 1. Architecture
+## 1. CI philosophy
 
-Two isolated, ENZU-specific pipelines are added. They are purely additive and never
-modify upstream workflow files, so `git merge upstream/master` stays conflict-free
-(upstream never touches `enzu-*` / `.gitlab-ci.yml`).
+- **Additive, never invasive.** Every ENZU file (`enzu-*`, `.gitlab-ci.yml`,
+  `Dockerfile.enzu-builder`, `docs/*`) is new. No upstream workflow or app source is
+  modified, so `git merge upstream/master` stays conflict-free.
+- **One platform, one owner.** Each platform is owned by the CI that runs it best,
+  avoiding duplicated infrastructure.
+- **Reproducible over convenient.** Tool versions are pinned everywhere and, for
+  Android on GitLab, frozen into a Docker image.
+- **Caches are best-effort.** A cache miss or cache-service outage must never fail a
+  build; real compiler errors are never suppressed.
+- **Artifacts only.** No releases, no tags — `permissions: contents: read` on GitHub.
+
+### Why GitHub builds Windows
+Windows builds run cleanly on GitHub's hosted `windows-2022` runners with zero extra
+infrastructure. Reproducing that on GitLab would require a self-hosted Windows runner
+plus Visual Studio, LLVM, Flutter, Rust and vcpkg — high cost, no benefit.
+
+### Why GitLab builds Android
+Android is a Linux-native build. GitLab runs it on a Linux runner using a prebuilt
+**builder image** (see [BUILDER_IMAGE.md](BUILDER_IMAGE.md)) that already contains the
+whole toolchain, giving fast, reproducible builds. GitHub also builds Android on
+hosted `ubuntu-24.04` as an always-available fallback.
+
+---
+
+## 2. Architecture
 
 ```
                        feature/enzu-custom-client
                                   │
-         ┌────────────────────────┴────────────────────────┐
-         │                                                  │
-  GitHub Actions                                        GitLab CI
-  .github/workflows/enzu-build.yml                     .gitlab-ci.yml
-  (workflow_dispatch)                                  (feature branch / manual)
-         │                                                  │
-   ┌─────┴──────┐                                    ┌──────┴───────┐
-   │ generate-  │  (shared, platform-neutral)        │ android-     │  (inline bridge)
-   │ bridge     │                                    │ arm64        │
-   └─────┬──────┘                                    └──────────────┘
-         │                                                  │  (independent)
-   ┌─────┴───────────────┐                           ┌──────┴───────┐
-   │                     │                           │ windows-x64  │  (inline bridge,
-┌──┴─────────┐   ┌───────┴──────┐                    │  manual)     │   tagged runner)
-│ android-   │   │ windows-x64  │                    └──────────────┘
-│ arm64      │   │              │
-└────────────┘   └──────────────┘
+         ┌────────────────────────┴─────────────────────────┐
+   GitHub Actions                                        GitLab CI
+   .github/workflows/enzu-build.yml                     .gitlab-ci.yml
+   (workflow_dispatch, contents: read)                  (feature branch / manual)
+         │                                                    │
+   generate-bridge  (ubuntu-22.04, Flutter 3.22.3)      image: enzu/rustdesk-builder
+         │                                                    │
+   ┌─────┴───────────────┐                              ┌─────┴──────┐
+   │                     │                              │ android-   │
+┌──┴─────────┐   ┌───────┴──────┐                       │ arm64      │
+│ android-   │   │ windows-x64  │                       └────────────┘
+│ arm64      │   │              │                       (bridge generated inline
+└────────────┘   └──────────────┘                        using tools baked in image)
    (parallel — neither depends on the other)
 ```
 
 **Dependency rules enforced:**
 
-- Android does **not** depend on Windows (and vice-versa).
-- Android does **not** depend on any Linux/macOS *desktop platform build* — those
-  platforms are not built at all in ENZU CI.
-- On GitHub, both platform jobs share one neutral `generate-bridge` prerequisite
-  (the flutter-rust-bridge codegen). This is a codegen helper, **not** a platform
-  build; it is exactly how upstream structures bridge generation.
-- On GitLab, each job generates its bridge **inline**, so the two jobs are fully
-  independent with zero shared stages.
+- Android and Windows never depend on each other.
+- No Linux/macOS *desktop platform build* exists in ENZU CI, so Android cannot depend
+  on one.
+- On GitHub, both platform jobs share one neutral `generate-bridge` prerequisite —
+  a codegen helper, not a platform build (see §7).
 - Every artifact uploads independently, per job.
 
 ---
 
-## 2. GitHub workflow (`.github/workflows/enzu-build.yml`)
+## 3. GitHub workflow (`.github/workflows/enzu-build.yml`)
 
 - **Trigger:** `workflow_dispatch` (manual only).
 - **Permissions:** `contents: read` (cannot create releases/tags).
@@ -61,25 +75,19 @@ modify upstream workflow files, so `git merge upstream/master` stays conflict-fr
   1. `generate-bridge` — `ubuntu-22.04`, Flutter 3.22.3, produces `enzu-bridge-artifact`.
   2. `android-arm64` — `ubuntu-24.04`, `needs: [generate-bridge]`.
   3. `windows-x64` — `windows-2022`, `needs: [generate-bridge]`.
-- **Output:** artifacts only. No `softprops/action-gh-release`, no tags, no releases.
+- **Output:** artifacts only. No release actions, no tags.
+
+## 4. GitLab workflow (`.gitlab-ci.yml`)
+
+- **Single stage `build`, single job `android-arm64`.** Windows is not built here.
+- Runs on the **builder image** (`enzu/rustdesk-builder:latest`), Linux+docker runner.
+- Self-contained: generates the bridge inline (tools from the image), builds the lib
+  and APK, uploads the APK (14-day retention).
+- Runs from `feature/enzu-custom-client`; never merges/pulls gitlab `main`.
 
 ---
 
-## 3. GitLab workflow (`.gitlab-ci.yml`)
-
-- **Stages:** `android` (first), then `windows` (second).
-- `android-arm64` runs on a **Linux** runner (tag `linux`), image `ubuntu:24.04`.
-  Self-contained: installs Rust/Flutter/NDK/vcpkg, generates the bridge inline,
-  builds the lib and APK.
-- `windows-x64` runs on a **tagged Windows** runner (tags `windows`, `x64`),
-  `needs: []`, `when: manual` — so the pipeline stays green when no Windows runner
-  is registered.
-- Runs from `feature/enzu-custom-client`. Does **not** merge or pull gitlab `main`
-  and does **not** touch the initial README commit.
-
----
-
-## 4. Required SDK / tool versions (pinned to upstream)
+## 5. Required SDK / tool versions (pinned to upstream)
 
 | Tool | Version | Used by |
 |------|---------|---------|
@@ -95,119 +103,136 @@ modify upstream workflow files, so `git merge upstream/master` stays conflict-fr
 | Java (JDK) | `17` | Android Gradle |
 | App VERSION | `1.4.9` | artifact naming |
 
----
+The GitHub workflow is the **source of truth** for these versions; the builder image
+`ENV` block mirrors them.
 
-## 5. Required runners
+## 6. Required runners
 
 | Job | GitHub runner | GitLab runner |
 |-----|---------------|---------------|
-| generate-bridge | `ubuntu-22.04` | (inline per job) |
-| Android arm64 | `ubuntu-24.04` | Linux, tag `linux`, Docker `ubuntu:24.04` |
-| Windows x64 | `windows-2022` | self-hosted shell runner, tags `windows`+`x64`, with Git, Python 3, VS Build Tools |
+| generate-bridge | `ubuntu-22.04` | (n/a — inline in image) |
+| Android arm64 | `ubuntu-24.04` | Linux+docker, tags `linux`,`docker`, builder image |
+| Windows x64 | `windows-2022` | (not built on GitLab) |
 
----
+## 7. Bridge generation rationale
 
-## 6. Artifact locations
+flutter-rust-bridge codegen is required (the generated files are git-ignored). It must
+run with **Flutter 3.22.3** and `extended_text` downgraded to `13.0.0` — the exact
+combination upstream pins for a reproducible `generated_bridge.freezed.dart`. Changing
+it risks a different/failing freezed output, so it is kept verbatim.
+
+**On GitHub — shared `generate-bridge` job (kept).** There are two consumers
+(Android + Windows). Bridge codegen is expensive (`cargo install
+flutter_rust_bridge_codegen` compiles from source) and version-sensitive. Running it
+**once** and sharing the artifact is cheaper and gives a single source of truth. The
+only cost is one neutral prerequisite edge, which does not couple the two platforms to
+each other. Verdict: **shared is objectively better here; keep it.**
+
+**On GitLab — inline (one consumer).** GitLab builds only Android, so there is a single
+consumer and no artifact to share. Generating inline (using tools already baked into
+the image, so it's fast) is simpler and removes cross-job coupling entirely.
+
+> This is a deliberate, asymmetric choice: shared where there are 2 consumers, inline
+> where there is 1. The bridge command itself is duplicated between the GitHub job and
+> the GitLab script (minor tech debt — see §12).
+
+## 8. Artifact locations
 
 | Platform | Artifact name | Contents | Retention |
 |----------|---------------|----------|-----------|
 | Android | `enzu-rustdesk-android-arm64` | `enzu-rustdesk-1.4.9-android-arm64.apk` (arm64-v8a, debug-signed) | 14 days |
-| Windows | `enzu-rustdesk-windows-x64` | `rustdesk/` portable folder (`rustdesk.exe` + deps) | 14 days |
+| Windows | `enzu-rustdesk-windows-x64` | `rustdesk/` portable folder | 14 days |
 | Bridge (GitHub) | `enzu-bridge-artifact` | generated bridge Dart/Rust files | 14 days |
 
-Download from the run summary (GitHub Actions → run → Artifacts; GitLab → pipeline
-job → Browse/Download artifacts).
+## 9. Build paths
 
----
+**Android arm64-v8a:** deps + Java 17 → Flutter 3.24.5 + patch → NDK r28c → vcpkg +
+`build_android_deps.sh arm64-v8a` → bridge → Rust 1.75 + cargo-ndk 3.1.2 +
+`ndk_arm64.sh` → copy `librustdesk.so` + `libc++_shared.so` into `jniLibs/arm64-v8a` →
+debug signing → `flutter build apk --release --target-platform android-arm64
+--split-per-abi`.
 
-## 7. Android build path (arm64-v8a)
+**Windows x64:** bridge → LLVM 15.0.6 + Flutter 3.24.5 (x64) + custom engine + patch →
+Rust 1.75 (`x86_64-pc-windows-msvc`) → vcpkg `x64-windows-static` → `python3 build.py
+--portable --flutter --skip-portable-pack --hwcodec --vram` → `rustdesk/` folder.
 
-1. Free disk space, install apt build deps, Java 17.
-2. Checkout with recursive submodules.
-3. Install Flutter 3.24.5, apply dropdown-filter patch.
-4. Install NDK r28c.
-5. Setup vcpkg; run `flutter/build_android_deps.sh arm64-v8a`.
-6. Restore/generate bridge files.
-7. Install Rust 1.75, `rustup target add aarch64-linux-android`, install cargo-ndk 3.1.2.
-8. `flutter/ndk_arm64.sh` builds `liblibrustdesk.so`.
-9. Copy `librustdesk.so` and NDK `libc++_shared.so` into `jniLibs/arm64-v8a`.
-10. Debug signing (`signingConfigs.release` → `signingConfigs.debug`), Gradle mem bump.
-11. `flutter build apk --release --target-platform android-arm64 --split-per-abi`.
-12. Rename to `enzu-rustdesk-1.4.9-android-arm64.apk` and upload.
-
-## 8. Windows build path (x64)
-
-1. Checkout with recursive submodules; restore/generate bridge.
-2. Install LLVM 15.0.6, Flutter 3.24.5 (x64), replace with RustDesk custom engine.
-3. Apply dropdown-filter patch.
-4. Install Rust 1.75 (`x86_64-pc-windows-msvc`).
-5. Setup vcpkg; install `x64-windows-static` deps.
-6. `python3 build.py --portable --flutter --skip-portable-pack --hwcodec --vram`.
-7. Move `flutter/build/windows/x64/runner/Release` → `rustdesk/`; add usbmmidd +
-   (best-effort) printer driver.
-8. Upload `rustdesk/` folder.
-
----
-
-## 9. Cache policy
+## 10. Cache policy
 
 Caching is **best-effort and never fatal**:
 
-- GitHub `Swatinem/rust-cache` and `actions/cache` steps use `continue-on-error: true`.
-- vcpkg GitHub Actions binary cache (`VCPKG_BINARY_SOURCES: clear;x-gha,readwrite`)
-  is a read/write *binary* cache — on a cache-service error vcpkg logs a warning and
-  **rebuilds from source** rather than failing.
-- GitLab `cache:` blocks use `when: always` with `policy: pull-push`; a miss just
-  triggers a clean build.
+- GitHub `Swatinem/rust-cache` and `actions/cache` (Gradle, bridge) steps use
+  `continue-on-error: true`; Flutter installs use `cache: true`.
+- vcpkg GitHub Actions binary cache (`VCPKG_BINARY_SOURCES: clear;x-gha,readwrite`) —
+  on a cache-service error vcpkg logs a warning and **rebuilds from source**.
+- GitLab `cache:` uses `when: always`; a miss just triggers a clean build. Cargo
+  registry + `target/` are cached inside the project dir.
 
-Real compiler/toolchain errors (Cargo, Gradle, Flutter, CMake, vcpkg source build)
-are **never** suppressed.
+Real compiler/toolchain errors (Cargo, Gradle, Flutter, CMake, vcpkg) are never
+suppressed.
+
+## 11. Troubleshooting
+
+**Cache failures** (`HTTP 400`, "cache service unavailable", "too many retries") —
+infrastructure noise, not source errors; builds proceed from a clean state. If vcpkg
+`x-gha` 400s persist, set `VCPKG_BINARY_SOURCES: "clear"` to disable the binary cache.
+
+**Bridge failures** — must use Flutter 3.22.3 + `extended_text 13.0.0`; verify
+`flutter pub get` ran before codegen. On GitHub, re-run only `generate-bridge`.
+
+**Cargo failures** — confirm Rust `1.75`, that `rustup target add` ran, and submodules
+are present. Clear the (optional) Rust cache and retry.
+
+**Gradle failures** — ensure `JAVA_HOME` is JDK 17 and the memory bump applied;
+`librustdesk.so` + `libc++_shared.so` must exist in `jniLibs/arm64-v8a` first.
+
+**Flutter failures** — verify Flutter 3.24.5 for the app build and the dropdown patch;
+on Windows confirm the custom-engine replacement succeeded.
+
+**Submodule failures** — always checkout recursively (`submodules: recursive` /
+`GIT_SUBMODULE_STRATEGY: recursive`).
+
+**GitLab image missing** — build `enzu/rustdesk-builder` and make it available to the
+runner ([BUILDER_IMAGE.md](BUILDER_IMAGE.md)).
+
+## 12. Future scaling & known tech debt
+
+- **Bridge command duplication** — the codegen invocation lives in both the GitHub
+  `generate-bridge` job and the GitLab script. If it grows, extract an ENZU-specific
+  shell script referenced by both (kept inline today for simplicity/low merge risk).
+- **New ABIs** — add a matrix entry (Android) or a target; the builder image already
+  has the arm64 toolchain (extend `rustup target add` / vcpkg triplets for more).
+- **Release signing** — currently debug-signed; wire `ANDROID_SIGNING_KEY` &
+  friends when release artifacts are needed (opt-in, out of scope here).
+- **vcpkg caching on GitLab** — deps resolve at run time; a project-dir binary cache
+  could be added if build minutes matter.
+
+## 13. Developer onboarding
+
+1. **Clone & remotes** (standard layout — `origin` kept for tooling compatibility):
+   ```
+   origin   -> git@github.com:ducsuperpromen/rustdesk.git
+   gitlab   -> git@gitlab.com:pos9014819/rust-desk.git
+   upstream -> https://github.com/rustdesk/rustdesk.git
+   ```
+2. **Work on** `feature/enzu-custom-client`. Never push to / merge `main` on either
+   remote.
+3. **GitHub build:** Actions → “ENZU Build” → *Run workflow* (`workflow_dispatch`).
+   Download APK/Windows artifacts from the run summary.
+4. **GitLab build:** build the builder image once
+   (`docker build -f Dockerfile.enzu-builder -t enzu/rustdesk-builder:latest .`), make
+   it available to a Linux+docker runner, then push the branch to `gitlab`.
+5. **Bump a tool version:** edit `.github/workflows/enzu-build.yml` (source of truth),
+   then mirror it in `Dockerfile.enzu-builder`.
 
 ---
 
-## 10. Troubleshooting
+## Appendix: root-cause note on the earlier CI failures
 
-**Cache failures** (`HTTP 400`, "cache service unavailable", "too many retries")
-— treat as infrastructure noise, not source errors. Builds proceed from a clean
-state. If vcpkg `x-gha` 400s persist and slow things down, set
-`VCPKG_BINARY_SOURCES: "clear"` in the workflow `env` to disable the binary cache
-entirely (slower, fully clean).
-
-**Bridge failures** (`flutter_rust_bridge_codegen` errors, missing
-`generated_bridge.freezed.dart`) — the bridge must be generated with Flutter
-**3.22.3** and `extended_text` downgraded to `13.0.0`; check those steps ran and
-that `flutter pub get` succeeded before codegen. On GitHub, re-run only the
-`generate-bridge` job.
-
-**Cargo failures** — confirm Rust `1.75` (not a newer default), that
-`rustup target add` ran for the target, and that submodules are present
-(`hbb_common` etc.). Clear the (optional) Rust cache and retry.
-
-**Gradle failures** — ensure `JAVA_HOME` points to JDK 17 and the Gradle memory
-bump applied. Native `librustdesk.so` and `libc++_shared.so` must exist in
-`jniLibs/arm64-v8a` before `flutter build apk`.
-
-**Flutter failures** — verify Flutter `3.24.5` for the app build and that the
-dropdown-filter patch applied. On Windows, confirm the custom engine replacement
-step succeeded.
-
-**Submodule failures** — always checkout with recursive submodules
-(`submodules: recursive` on GitHub, `GIT_SUBMODULE_STRATEGY: recursive` on GitLab).
-A missing submodule surfaces later as a Cargo/CMake "file not found".
-
-**Windows runner absent (GitLab)** — the `windows-x64` job is `when: manual` with
-`needs: []`; the pipeline succeeds without it. Register a shell runner tagged
-`windows`+`x64` (Git, Python 3, VS Build Tools) and start the job manually.
-
----
-
-## 11. Remotes
-
-```
-github   -> git@github.com:ducsuperpromen/rustdesk.git   (origin renamed to github)
-gitlab   -> git@gitlab.com:pos9014819/rust-desk.git
-upstream -> https://github.com/rustdesk/rustdesk.git      (kept, never removed)
-```
-
-Push the ENZU branch to both `github` and `gitlab` as `feature/enzu-custom-client`.
-Never push to / merge gitlab `main`.
+The earlier failures (`HTTP 400`, "our services aren't available", "too many retries")
+came from the **original large upstream workflow** run. The logs for that run are not
+available in this environment (`gh` CLI is not installed / not authenticated here), so
+the first-failing step **cannot be proven** from data. Observationally the messages are
+GitHub cache/artifact *service* errors (infrastructure), not compiler errors — but this
+remains unproven until the run logs are inspected. The ENZU workflows are hardened
+against that class of failure regardless (see §10), which is the actionable mitigation
+independent of the unproven root cause.
