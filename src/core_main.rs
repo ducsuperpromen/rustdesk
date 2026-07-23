@@ -33,6 +33,11 @@ pub fn core_main() -> Option<Vec<String>> {
         return None;
     }
     crate::load_custom_client();
+    // ENZU: apply embedded server defaults for every desktop client process,
+    // including the Windows `--server` subprocess that registers with hbbs.
+    // Idempotent; DEFAULT_SETTINGS is the lowest-priority tier so user/admin
+    // settings always win. See src/enzu_config.rs.
+    crate::enzu_config::apply_enzu_defaults();
     #[cfg(windows)]
     if !crate::platform::windows::bootstrap() {
         // return None to terminate the process

@@ -50,6 +50,10 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     } else {
         crate::read_custom_client(custom_client_config);
     }
+    // ENZU: apply embedded server defaults (Android and Flutter desktop enter here).
+    // Runs before the first rendezvous lookup; idempotent; user settings still win.
+    // See src/enzu_config.rs.
+    crate::enzu_config::apply_enzu_defaults();
     #[cfg(target_os = "android")]
     {
         // flexi_logger can't work when android_logger initialized.

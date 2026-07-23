@@ -56,3 +56,8 @@ vcpkg_installed
 flutter/lib/generated_plugin_registrant.dart
 libsciter.dylib
 flutter/web/
+# ENZU: never commit RustDesk server PRIVATE keys.
+# (The server PUBLIC key `id_ed25519.pub` is embedded as a Rust constant in
+#  src/enzu_config.rs, so no public-key file needs to be committed either.)
+id_ed25519
+**/id_ed25519

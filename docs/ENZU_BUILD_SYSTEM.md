@@ -12,7 +12,7 @@ This document describes the ENZU custom-client CI/CD layer for this RustDesk for
 ## 1. CI philosophy
 
 - **Additive, never invasive.** Every ENZU file (`enzu-*`, `.gitlab-ci.yml`,
-  `Dockerfile.enzu-builder`, `docs/*`) is new. No upstream workflow or app source is
+  `docker/builder/*`, `docs/*`) is new. No upstream workflow or app source is
   modified, so `git merge upstream/master` stays conflict-free.
 - **One platform, one owner.** Each platform is owned by the CI that runs it best,
   avoiding duplicated infrastructure.
@@ -29,7 +29,7 @@ plus Visual Studio, LLVM, Flutter, Rust and vcpkg — high cost, no benefit.
 
 ### Why GitLab builds Android
 Android is a Linux-native build. GitLab runs it on a Linux runner using a prebuilt
-**builder image** (see [BUILDER_IMAGE.md](BUILDER_IMAGE.md)) that already contains the
+**builder image** (see [docker/builder/README.md](../docker/builder/README.md)) that already contains the
 whole toolchain, giving fast, reproducible builds. GitHub also builds Android on
 hosted `ubuntu-24.04` as an always-available fallback.
 
@@ -80,7 +80,8 @@ hosted `ubuntu-24.04` as an always-available fallback.
 ## 4. GitLab workflow (`.gitlab-ci.yml`)
 
 - **Single stage `build`, single job `android-arm64`.** Windows is not built here.
-- Runs on the **builder image** (`enzu/rustdesk-builder:latest`), Linux+docker runner.
+- Runs on the **builder image** (`enzu/rustdesk-builder:1.0.0`, pinned), Linux+docker runner.
+- Runs `scripts/verify_enzu_config.py` before building (also a dedicated GitHub job).
 - Self-contained: generates the bridge inline (tools from the image), builds the lib
   and APK, uploads the APK (14-day retention).
 - Runs from `feature/enzu-custom-client`; never merges/pulls gitlab `main`.
@@ -140,7 +141,7 @@ the image, so it's fast) is simpler and removes cross-job coupling entirely.
 
 | Platform | Artifact name | Contents | Retention |
 |----------|---------------|----------|-----------|
-| Android | `enzu-rustdesk-android-arm64` | `enzu-rustdesk-1.4.9-android-arm64.apk` (arm64-v8a, debug-signed) | 14 days |
+| Android | `enzu-rustdesk-android-arm64-configured` | `enzu-rustdesk-1.4.9-android-arm64.apk` (arm64-v8a, debug-signed, ENZU defaults) | 14 days |
 | Windows | `enzu-rustdesk-windows-x64` | `rustdesk/` portable folder | 14 days |
 | Bridge (GitHub) | `enzu-bridge-artifact` | generated bridge Dart/Rust files | 14 days |
 
@@ -191,8 +192,8 @@ on Windows confirm the custom-engine replacement succeeded.
 **Submodule failures** — always checkout recursively (`submodules: recursive` /
 `GIT_SUBMODULE_STRATEGY: recursive`).
 
-**GitLab image missing** — build `enzu/rustdesk-builder` and make it available to the
-runner ([BUILDER_IMAGE.md](BUILDER_IMAGE.md)).
+**GitLab image missing** — build `enzu/rustdesk-builder:1.0.0` and make it available to
+the runner ([docker/builder/README.md](../docker/builder/README.md)).
 
 ## 12. Future scaling & known tech debt
 
@@ -219,10 +220,10 @@ runner ([BUILDER_IMAGE.md](BUILDER_IMAGE.md)).
 3. **GitHub build:** Actions → “ENZU Build” → *Run workflow* (`workflow_dispatch`).
    Download APK/Windows artifacts from the run summary.
 4. **GitLab build:** build the builder image once
-   (`docker build -f Dockerfile.enzu-builder -t enzu/rustdesk-builder:latest .`), make
+   (`docker/builder/build.sh`, produces `enzu/rustdesk-builder:1.0.0`), make
    it available to a Linux+docker runner, then push the branch to `gitlab`.
 5. **Bump a tool version:** edit `.github/workflows/enzu-build.yml` (source of truth),
-   then mirror it in `Dockerfile.enzu-builder`.
+   then mirror it in `docker/builder/Dockerfile`.
 
 ---
 

@@ -30,7 +30,7 @@ android-arm64:
   # Prebuilt ENZU toolchain image. NOT published — build it and make it available to
   # the runner (locally or via a registry). See docs/BUILDER_IMAGE.md.
   image:
-    name: enzu/rustdesk-builder:latest
+    name: enzu/rustdesk-builder:1.0.0
     pull_policy: [if-not-present, always]
   tags:
     - linux
@@ -51,6 +51,8 @@ android-arm64:
       - target/
   script:
     - set -e
+    # 0) Verify the ENZU embedded config (single source of truth) before building.
+    - python3 scripts/verify_enzu_config.py
     - export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
     # 1) Generate flutter-rust-bridge. Codegen uses the pinned bridge Flutter (3.22.3),
     #    already installed in the image; the app is still built with 3.24.5 below.
@@ -75,7 +77,7 @@ android-arm64:
     - (cd flutter && flutter build apk --release --target-platform android-arm64 --split-per-abi)
     - mv flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ./enzu-rustdesk-${VERSION}-android-arm64.apk
   artifacts:
-    name: enzu-rustdesk-android-arm64
+    name: enzu-rustdesk-android-arm64-configured
     expire_in: 14 days
     when: on_success
     paths:

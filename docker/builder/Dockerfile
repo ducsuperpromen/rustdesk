@@ -7,9 +7,11 @@
 # This image is ENZU-specific and additive. It does NOT modify any RustDesk
 # source, so it never conflicts with `git merge upstream/master`.
 #
-# NOTE: intentionally NOT published. Build it locally / on your registry:
-#   docker build -f Dockerfile.enzu-builder -t enzu/rustdesk-builder:latest .
-# See docs/BUILDER_IMAGE.md.
+# NOTE: intentionally NOT published. Build it locally / on your registry with the
+# pinned version tag from docker/builder/VERSION (do NOT use :latest):
+#   docker/builder/build.sh          (or build.ps1 on Windows)
+#   # equivalently: docker build -f docker/builder/Dockerfile -t enzu/rustdesk-builder:1.0.0 .
+# See docker/builder/README.md.
 #
 # Versions below are pinned to match .github/workflows/enzu-build.yml and upstream
 # flutter-build.yml so an image build produces binaries identical to hosted CI.
