@@ -81,6 +81,10 @@ builds stay identical.
 
 ## What runs at build time (not baked in)
 
+- **ENZU server config** — the ID/relay servers and public key are **not** in this image.
+  They are injected when the crate compiles (precedence: GitLab CI/CD Variable → local
+  `.env` → built-in fallback), so one image builds any environment. See
+  [../../docs/enzu/EMBEDDED_SERVER_CONFIG.md](../../docs/enzu/EMBEDDED_SERVER_CONFIG.md).
 - **ENZU config verification** — `scripts/verify_enzu_config.py` (fast, deterministic).
 - **Bridge generation** — derived from `src/flutter_ffi.rs`; tools are preinstalled so
   only the fast codegen runs.

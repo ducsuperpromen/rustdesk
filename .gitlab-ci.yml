@@ -51,7 +51,12 @@ android-arm64:
       - target/
   script:
     - set -e
-    # 0) Verify the ENZU embedded config (single source of truth) before building.
+    # 0) Verify the ENZU build-time config before building. Values are injected via
+    #    build.rs with precedence: CI variable > .env > built-in ENZU fallback.
+    #    Define ENZU_ID_SERVER / ENZU_RELAY_SERVER / ENZU_PUBLIC_KEY under
+    #    Settings -> CI/CD -> Variables to override the built-in ENZU defaults; leave
+    #    them undefined to use the fallback. GitLab auto-injects defined variables into
+    #    this job's env, so build.rs/the verifier pick them up. NO values live in YAML.
     - python3 scripts/verify_enzu_config.py
     - export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
     # 1) Generate flutter-rust-bridge. Codegen uses the pinned bridge Flutter (3.22.3),

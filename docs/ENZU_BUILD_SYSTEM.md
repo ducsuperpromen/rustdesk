@@ -86,6 +86,14 @@ hosted `ubuntu-24.04` as an always-available fallback.
   and APK, uploads the APK (14-day retention).
 - Runs from `feature/enzu-custom-client`; never merges/pulls gitlab `main`.
 
+### Build-time server configuration
+
+The ENZU ID/relay servers and public key are **injected at build time** (precedence:
+CI Variable → local `.env` → built-in ENZU fallback in `src/enzu_config.rs`). CI never
+stores these values in YAML — GitHub maps repo *Variables*, GitLab auto-injects CI/CD
+*Variables*; `build.rs` validates them and fails fast on a provided-but-invalid value.
+Full details: [enzu/EMBEDDED_SERVER_CONFIG.md](enzu/EMBEDDED_SERVER_CONFIG.md).
+
 ---
 
 ## 5. Required SDK / tool versions (pinned to upstream)

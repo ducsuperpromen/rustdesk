@@ -3,7 +3,9 @@
 .vscode
 .idea
 .DS_Store
+# ENZU: local build-time config; never commit. Keep the .env.example template.
 .env
+!.env.example
 libsciter-gtk.so
 src/ui/inline.rs
 extractor

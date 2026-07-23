@@ -1,22 +1,26 @@
-//! ENZU embedded server configuration — the single source of truth.
+//! ENZU embedded server configuration — build-time injected, one place.
 //!
-//! This isolated module carries the ENZU self-hosted RustDesk defaults so that a
-//! fresh install connects to ENZU infrastructure with no manual Settings step.
+//! A fresh install connects to the ENZU infrastructure with no manual Settings
+//! step. The concrete server values are **injected at build time** so the same
+//! source builds ENZU, DEV, TEST, or a customer environment without edits.
 //!
-//! Design (see `docs/enzu/EMBEDDED_SERVER_CONFIG.md`):
-//!   * Values are applied into RustDesk's `DEFAULT_SETTINGS` map, which is the
-//!     LOWEST-priority tier of `Config::get_option`
-//!     (`OVERWRITE_SETTINGS` > user-saved options > `DEFAULT_SETTINGS`, see
-//!     `libs/hbb_common/src/config.rs`). Therefore user/administrator changes
-//!     always win and are never overwritten — this is the "default" policy.
-//!   * `DEFAULT_SETTINGS` is in-memory only: applying defaults writes NO config
-//!     file, calls NO `set_option`, and can safely run on every process start.
-//!   * The embedded key is the ENZU RustDesk *server public key*. A public key is
-//!     not secret, so committing it to source is acceptable and intentional; the
-//!     private key is never present here.
+//! Value precedence (resolved in `build.rs`, exported via `cargo:rustc-env`, read
+//! here with `option_env!`):
+//!   1. CI build environment variables (GitHub Actions Variables / GitLab CI vars)
+//!   2. a local `.env` at the repo root (developer convenience; git-ignored)
+//!   3. the built-in `FALLBACK_*` constants below (stock ENZU deployment)
 //!
-//! Keeping every ENZU literal in this one file keeps the upstream merge-conflict
-//! surface minimal (upstream never touches `enzu_config.rs`).
+//! `build.rs` **fails the build** if a value is *provided but invalid* (empty,
+//! placeholder, bad hostname, localhost, a public RustDesk server, or a public key
+//! that is not 32 bytes). A value that is *completely absent* falls back to the
+//! constants below — so upstream/offline `cargo build` still works and never
+//! silently selects the public RustDesk infrastructure. See
+//! `docs/enzu/EMBEDDED_SERVER_CONFIG.md`.
+//!
+//! Runtime behaviour is unchanged from the previous phase: values are applied into
+//! RustDesk's `DEFAULT_SETTINGS` (the LOWEST-priority tier of `Config::get_option`,
+//! `OVERWRITE_SETTINGS` > user-saved options > `DEFAULT_SETTINGS`), in-memory only,
+//! so user/administrator changes always win and nothing is written on startup.
 
 use hbb_common::config::{keys, DEFAULT_SETTINGS};
 use std::collections::HashMap;
@@ -52,16 +56,40 @@ impl EnzuServerPolicy {
 /// Active policy for this build. This phase ships only `default`.
 pub const ENZU_SERVER_POLICY: EnzuServerPolicy = EnzuServerPolicy::Default;
 
-/// ENZU ID / rendezvous (hbbs) server.
-pub const ENZU_ID_SERVER: &str = "remote.enzutech.de";
+// ---------------------------------------------------------------------------
+// Fallback constants — the stock ENZU deployment. These are used ONLY when no
+// build-time value is injected (no CI variable and no `.env`). They are the single
+// place ENZU deployment values live in committed source; `build.rs` and
+// `scripts/verify_enzu_config.py` treat this file as the source of truth.
+// A public key is not a secret, so committing it here is intentional.
+// ---------------------------------------------------------------------------
 
-/// ENZU relay (hbbr) server.
-pub const ENZU_RELAY_SERVER: &str = "relay.enzutech.de";
-
-/// ENZU RustDesk server PUBLIC key (contents of `id_ed25519.pub`, base64, 32 bytes).
-/// Public information — not a credential. SHA-256 of the decoded 32 bytes:
+/// Fallback ENZU ID / rendezvous (hbbs) server.
+const FALLBACK_ID_SERVER: &str = "remote.enzutech.de";
+/// Fallback ENZU relay (hbbr) server.
+const FALLBACK_RELAY_SERVER: &str = "relay.enzutech.de";
+/// Fallback ENZU RustDesk server PUBLIC key (contents of `id_ed25519.pub`, base64,
+/// 32 bytes). SHA-256 of the decoded bytes:
 /// 9df7628517123f41de4b54b8195042082ddd2564a84eec1040f89e90c677ad24
-pub const ENZU_PUBLIC_KEY: &str = "5d+iJ5z0+NuD377LgB1CBvlz4KQqbet3QFW+gCe4h3k=";
+const FALLBACK_PUBLIC_KEY: &str = "5d+iJ5z0+NuD377LgB1CBvlz4KQqbet3QFW+gCe4h3k=";
+
+/// Effective ENZU ID / rendezvous (hbbs) server (build-time value or fallback).
+pub const ENZU_ID_SERVER: &str = match option_env!("ENZU_ID_SERVER") {
+    Some(v) => v,
+    None => FALLBACK_ID_SERVER,
+};
+
+/// Effective ENZU relay (hbbr) server (build-time value or fallback).
+pub const ENZU_RELAY_SERVER: &str = match option_env!("ENZU_RELAY_SERVER") {
+    Some(v) => v,
+    None => FALLBACK_RELAY_SERVER,
+};
+
+/// Effective ENZU RustDesk server PUBLIC key (build-time value or fallback).
+pub const ENZU_PUBLIC_KEY: &str = match option_env!("ENZU_PUBLIC_KEY") {
+    Some(v) => v,
+    None => FALLBACK_PUBLIC_KEY,
+};
 
 static APPLY_ONCE: Once = Once::new();
 
@@ -113,25 +141,39 @@ mod tests {
     use hbb_common::config::{Config, DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
 
     #[test]
-    fn constants_are_the_expected_enzu_values() {
+    fn policy_and_version_are_expected() {
         assert_eq!(ENZU_CONFIG_VERSION, 1);
         assert_eq!(ENZU_SERVER_POLICY, EnzuServerPolicy::Default);
         assert_eq!(ENZU_SERVER_POLICY.as_str(), "default");
-        assert_eq!(ENZU_ID_SERVER, "remote.enzutech.de");
-        assert_eq!(ENZU_RELAY_SERVER, "relay.enzutech.de");
-        assert!(!ENZU_PUBLIC_KEY.is_empty());
     }
 
     #[test]
-    fn public_key_is_valid_32_byte_base64() {
+    fn fallback_constants_are_the_stock_enzu_deployment() {
+        assert_eq!(FALLBACK_ID_SERVER, "remote.enzutech.de");
+        assert_eq!(FALLBACK_RELAY_SERVER, "relay.enzutech.de");
+        let raw = STANDARD
+            .decode(FALLBACK_PUBLIC_KEY)
+            .expect("FALLBACK_PUBLIC_KEY must be valid base64");
+        assert_eq!(raw.len(), 32, "fallback public key must be 32 bytes");
+    }
+
+    #[test]
+    fn effective_values_are_non_empty_and_key_is_valid() {
+        // Whatever was injected at build time (or the fallback) must be usable.
+        assert!(!ENZU_ID_SERVER.is_empty());
+        assert!(!ENZU_RELAY_SERVER.is_empty());
         let raw = STANDARD
             .decode(ENZU_PUBLIC_KEY)
             .expect("ENZU_PUBLIC_KEY must be valid base64");
-        assert_eq!(raw.len(), 32, "ed25519 public key must decode to 32 bytes");
+        assert_eq!(
+            raw.len(),
+            32,
+            "effective public key must decode to 32 bytes"
+        );
         // Same validation path the client itself uses to build a verifying key.
         assert!(
             crate::common::get_rs_pk(ENZU_PUBLIC_KEY).is_some(),
-            "get_rs_pk must accept the embedded ENZU public key"
+            "get_rs_pk must accept the effective ENZU public key"
         );
     }
 
