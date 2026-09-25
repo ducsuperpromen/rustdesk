@@ -1,9 +1,13 @@
 name: Flutter Nightly Build
 
 on:
-  schedule:
-    # schedule build every night
-    - cron: "0 0 * * *"
+  # ENZU: automatic nightly cron disabled to avoid wasting Actions minutes on
+  # this fork (no ENZU requirement for a scheduled nightly build). Upstream's
+  # cron trigger can be restored if a real need shows up; workflow_dispatch is
+  # kept so the build stays available on demand.
+  # schedule:
+  #   # schedule build every night
+  #   - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
