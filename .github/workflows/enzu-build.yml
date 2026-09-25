@@ -206,9 +206,27 @@ jobs:
           cache: true
 
       - name: Patch flutter
+        # The Install-flutter step above caches the Flutter SDK (cache: true). On a cache
+        # hit this checkout may already carry this patch from a previous run (the cache
+        # is saved with whatever is on disk at job end, i.e. post-patch). A plain
+        # `git apply` would then fail with "patch does not apply" even though nothing is
+        # actually wrong, so check the tree's actual state instead of assuming it's
+        # pristine: apply if not yet applied, skip if already applied, fail loudly on any
+        # other mismatch (do not silently swallow a real patch failure).
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          PATCH_PATH="${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          if [[ "3.24.5" == "${{ env.FLUTTER_VERSION }}" ]]; then
+            if git apply --check "$PATCH_PATH" 2>/dev/null; then
+              git apply "$PATCH_PATH"
+              echo "Applied $PATCH_PATH"
+            elif git apply --check --reverse "$PATCH_PATH" 2>/dev/null; then
+              echo "Patch already present in cached Flutter SDK, skipping: $PATCH_PATH"
+            else
+              echo "ERROR: $PATCH_PATH does not apply and is not already applied - real patch failure" >&2
+              exit 1
+            fi
+          fi
 
       - name: Gradle cache (optional)
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -369,11 +387,28 @@ jobs:
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
 
       - name: Patch flutter
+        # See the equivalent step in the android-arm64 job: the Install-flutter step
+        # above caches the Flutter SDK (cache: true), so on a cache hit this checkout may
+        # already carry this patch from a previous run. Check the tree's actual state
+        # instead of assuming it's pristine: apply if not yet applied, skip if already
+        # applied, fail loudly on any other mismatch (do not silently swallow a real
+        # patch failure).
         shell: bash
         run: |
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
           cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]] && git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          PATCH_FILE="flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          if [[ "3.24.5" == "${{ env.FLUTTER_VERSION }}" ]]; then
+            if git apply --check "$PATCH_FILE" 2>/dev/null; then
+              git apply "$PATCH_FILE"
+              echo "Applied $PATCH_FILE"
+            elif git apply --check --reverse "$PATCH_FILE" 2>/dev/null; then
+              echo "Patch already present in cached Flutter SDK, skipping: $PATCH_FILE"
+            else
+              echo "ERROR: $PATCH_FILE does not apply and is not already applied - real patch failure" >&2
+              exit 1
+            fi
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
